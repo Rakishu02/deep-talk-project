@@ -1,35 +1,59 @@
 import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ritualBeats, sparkPrompts, starterQuestions } from "./data/questionDeck";
 import { audioManager } from "./lib/audioManager";
 import { hasSupabaseConfig, supabase } from "./lib/supabase";
 
-const demoQuestions = [
-  {
-    id: 1,
-    text: "What is a tiny moment with me that you still replay in your mind?",
-    is_opened: false,
-  },
-  {
-    id: 2,
-    text: "When do you feel the most emotionally safe with us?",
-    is_opened: false,
-  },
-  {
-    id: 3,
-    text: "What dream have you been quietly carrying that you want me to know about?",
-    is_opened: false,
-  },
-  {
-    id: 4,
-    text: "What is one way I can love you more gently this season?",
-    is_opened: false,
-  },
-  {
-    id: 5,
-    text: "What part of our story feels most like magic to you?",
-    is_opened: true,
-  },
-];
+const STARTER_OPENED_KEY = "deep-talk-vault:starter-opened";
+
+function getOpenedStarterIds() {
+  if (typeof window === "undefined") return new Set();
+
+  try {
+    const rawValue = window.localStorage.getItem(STARTER_OPENED_KEY);
+    const parsedValue = rawValue ? JSON.parse(rawValue) : [];
+    return new Set(Array.isArray(parsedValue) ? parsedValue : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveOpenedStarterId(questionId) {
+  if (typeof window === "undefined") return;
+
+  const openedIds = getOpenedStarterIds();
+  openedIds.add(questionId);
+  window.localStorage.setItem(STARTER_OPENED_KEY, JSON.stringify([...openedIds]));
+}
+
+function resetOpenedStarterIds() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(STARTER_OPENED_KEY);
+}
+
+function buildStarterDeck() {
+  const openedIds = getOpenedStarterIds();
+
+  return starterQuestions.map((question) => ({
+    ...question,
+    created_at: null,
+    is_opened: openedIds.has(question.id),
+    source: "starter",
+  }));
+}
+
+function normalizeSavedQuestion(question) {
+  return {
+    ...question,
+    category: "Yours",
+    intensity: "Personal",
+    source: "supabase",
+  };
+}
+
+function pickRandom(items) {
+  return items[Math.floor(Math.random() * items.length)];
+}
 
 const starSeeds = Array.from({ length: 72 }, (_, index) => ({
   id: index,
@@ -44,7 +68,7 @@ const starSeeds = Array.from({ length: 72 }, (_, index) => ({
 function App() {
   const [hasBegun, setHasBegun] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [view, setView] = useState("write");
+  const [view, setView] = useState("vault");
   const [questions, setQuestions] = useState([]);
   const [activeQuestion, setActiveQuestion] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -66,7 +90,10 @@ function App() {
     setError("");
 
     if (!hasSupabaseConfig) {
-      setQuestions((current) => (current.length ? current : demoQuestions));
+      setQuestions((current) => {
+        const localQuestions = current.filter((question) => question.source === "local");
+        return [...localQuestions, ...buildStarterDeck()];
+      });
       return;
     }
 
@@ -80,10 +107,11 @@ function App() {
 
     if (loadError) {
       setError("The vault could not reach Supabase. Check your keys and table policy.");
+      setQuestions((current) => (current.length ? current : buildStarterDeck()));
       return;
     }
 
-    setQuestions(data ?? []);
+    setQuestions([...(data ?? []).map(normalizeSavedQuestion), ...buildStarterDeck()]);
   }, []);
 
   useEffect(() => {
@@ -104,14 +132,17 @@ function App() {
 
     if (!hasSupabaseConfig) {
       setQuestions((current) => [
-        ...current,
         {
-          id: Date.now(),
+          id: `local-${Date.now()}`,
           text: trimmedText,
+          category: "Yours",
+          intensity: "Personal",
           is_opened: false,
+          source: "local",
         },
+        ...current,
       ]);
-      setSuccess("Added to the stars");
+      setSuccess("Added to tonight");
       return true;
     }
 
@@ -126,8 +157,8 @@ function App() {
       return false;
     }
 
-    setQuestions((current) => [...current, data]);
-    setSuccess("Added to the stars");
+    setQuestions((current) => [normalizeSavedQuestion(data), ...current]);
+    setSuccess("Added to tonight");
     return true;
   };
 
@@ -136,14 +167,44 @@ function App() {
     setActiveQuestion(question);
   };
 
+  const openSurpriseQuestion = () => {
+    const unopenedQuestions = questions.filter((question) => !question.is_opened);
+    const candidates = unopenedQuestions.length ? unopenedQuestions : questions;
+
+    if (!candidates.length) {
+      setError("Add a question first, then the vault can draw one for you.");
+      return;
+    }
+
+    audioManager.play("draw");
+    setActiveQuestion(pickRandom(candidates));
+  };
+
+  const resetStarterDeck = () => {
+    resetOpenedStarterIds();
+    audioManager.play("submit");
+    setQuestions((current) =>
+      current.map((question) =>
+        question.source === "starter" ? { ...question, is_opened: false } : question,
+      ),
+    );
+  };
+
   const markQuestionOpened = async (questionId) => {
+    const selectedQuestion = questions.find((question) => question.id === questionId);
+
     setQuestions((current) =>
       current.map((question) =>
         question.id === questionId ? { ...question, is_opened: true } : question,
       ),
     );
 
-    if (!hasSupabaseConfig) return;
+    if (selectedQuestion?.source === "starter") {
+      saveOpenedStarterId(questionId);
+      return;
+    }
+
+    if (!hasSupabaseConfig || selectedQuestion?.source !== "supabase") return;
 
     const { error: updateError } = await supabase
       .from("questions")
@@ -191,8 +252,13 @@ function App() {
 
       <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(circle_at_50%_0%,rgba(124,134,255,0.18),transparent_38%),radial-gradient(circle_at_12%_80%,rgba(255,180,126,0.10),transparent_28%)]" />
 
-      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-5 py-6 sm:px-8">
-        <TopBar muted={muted} onToggleMuted={toggleMuted} />
+      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 pb-28 pt-5 sm:px-8 sm:pb-8 sm:pt-6">
+        <TopBar
+          muted={muted}
+          view={view}
+          onChangeView={setView}
+          onToggleMuted={toggleMuted}
+        />
 
         <LayoutGroup>
           <AnimatePresence mode="wait">
@@ -216,11 +282,15 @@ function App() {
                 onNext={openNextQuestion}
                 onOpenQuestion={openQuestion}
                 onReload={loadQuestions}
+                onResetStarterDeck={resetStarterDeck}
+                onSurprise={openSurpriseQuestion}
                 onSwitchView={() => setView("write")}
               />
             )}
           </AnimatePresence>
         </LayoutGroup>
+
+        <MobileDock view={view} onChangeView={setView} />
       </main>
     </div>
   );
@@ -228,45 +298,52 @@ function App() {
 
 function LandingScreen({ onBegin }) {
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#030513] px-5 text-stone-50">
+    <div className="relative flex min-h-screen overflow-hidden bg-[#030513] px-5 text-stone-50">
       <CosmicBackdrop />
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 1.1, ease: [0.16, 1, 0.3, 1] }}
-        className="glass-card relative z-10 max-w-2xl px-7 py-10 text-center sm:px-12 sm:py-14"
+        className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-end pb-10 pt-16 sm:justify-center sm:pb-16"
       >
-        <p className="mb-4 text-xs uppercase tracking-[0.55em] text-sky-100/65">
+        <p className="mb-4 max-w-fit border-b border-sky-100/20 pb-3 text-xs uppercase tracking-[0.38em] text-sky-100/65 sm:tracking-[0.55em]">
+          Private ritual for two voices
+        </p>
+        <h1 className="max-w-4xl font-serif text-6xl font-semibold leading-none text-stone-50 sm:text-8xl">
           Deep Talk Vault
-        </p>
-        <h1 className="font-serif text-5xl font-semibold leading-none text-stone-50 sm:text-7xl">
-          A softer place for the two of you.
         </h1>
-        <p className="mx-auto mt-6 max-w-xl text-balance text-base leading-8 text-blue-100/72 sm:text-lg">
-          Open the night together, write what matters, and let each question become
-          a small star you can return to.
+        <p className="mt-6 max-w-2xl text-balance text-base leading-8 text-blue-100/72 sm:text-xl sm:leading-9">
+          A pocket-sized night sky of questions, soft timers, and tiny sounds for
+          conversations that deserve more than a quick reply.
         </p>
-        <motion.button
-          whileHover={{ scale: 1.04 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={onBegin}
-          className="mt-9 rounded-full border border-sky-100/25 bg-sky-100 px-8 py-3 text-sm font-semibold uppercase tracking-[0.28em] text-slate-950 shadow-aurora transition hover:bg-white"
-        >
-          Begin
-        </motion.button>
-        <p className="mt-6 text-xs text-blue-100/45">
-          Audio begins after this tap, because browsers prefer consent before enchantment.
-        </p>
+        <div className="mt-9 flex flex-col gap-4 sm:flex-row sm:items-center">
+          <motion.button
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={onBegin}
+            className="rounded-full border border-sky-100/25 bg-sky-100 px-8 py-4 text-sm font-semibold uppercase tracking-[0.24em] text-slate-950 shadow-aurora transition hover:bg-white"
+          >
+            Begin The Night
+          </motion.button>
+          <p className="max-w-xs text-sm leading-6 text-blue-100/48">
+            Audio unlocks on tap. The vault already has a starter deck inside.
+          </p>
+        </div>
+        <div className="mt-12 grid gap-3 text-xs uppercase tracking-[0.22em] text-blue-100/55 sm:grid-cols-3">
+          <span className="landing-signal">24 questions</span>
+          <span className="landing-signal">One-minute ritual</span>
+          <span className="landing-signal">Phone-ready</span>
+        </div>
       </motion.div>
     </div>
   );
 }
 
-function TopBar({ muted, onToggleMuted }) {
+function TopBar({ muted, view, onChangeView, onToggleMuted }) {
   return (
-    <header className="flex items-center justify-between">
+    <header className="flex items-center justify-between gap-4">
       <div>
-        <p className="text-xs uppercase tracking-[0.42em] text-blue-100/50">
+        <p className="text-xs uppercase tracking-[0.32em] text-blue-100/50 sm:tracking-[0.42em]">
           Twilight Ritual
         </p>
         <h1 className="mt-2 font-serif text-3xl text-stone-50 sm:text-4xl">
@@ -274,21 +351,56 @@ function TopBar({ muted, onToggleMuted }) {
         </h1>
       </div>
 
-      <button
-        aria-label={muted ? "Unmute audio" : "Mute audio"}
-        onClick={onToggleMuted}
-        className="rounded-full border border-white/10 bg-white/[0.07] p-3 text-blue-50 shadow-glass backdrop-blur-md transition hover:border-white/25 hover:bg-white/[0.12]"
-      >
-        {muted ? <MutedIcon /> : <SoundIcon />}
-      </button>
+      <div className="flex items-center gap-3">
+        <div className="hidden sm:block">
+          <ModeSwitch view={view} onChangeView={onChangeView} />
+        </div>
+        <button
+          aria-label={muted ? "Unmute audio" : "Mute audio"}
+          onClick={onToggleMuted}
+          className="rounded-full border border-white/10 bg-white/[0.07] p-3 text-blue-50 shadow-glass backdrop-blur-md transition hover:border-white/25 hover:bg-white/[0.12]"
+        >
+          {muted ? <MutedIcon /> : <SoundIcon />}
+        </button>
+      </div>
     </header>
+  );
+}
+
+function ModeSwitch({ view, onChangeView }) {
+  return (
+    <nav className="mode-switch" aria-label="Mode switch">
+      {["vault", "write"].map((mode) => (
+        <button
+          key={mode}
+          type="button"
+          onClick={() => onChangeView(mode)}
+          className={view === mode ? "is-active" : ""}
+        >
+          {mode === "vault" ? "Vault" : "Write"}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function MobileDock({ view, onChangeView }) {
+  return (
+    <div className="mobile-dock sm:hidden">
+      <ModeSwitch view={view} onChangeView={onChangeView} />
+    </div>
   );
 }
 
 function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView }) {
   const [text, setText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [sparkPage, setSparkPage] = useState(0);
   const textareaRef = useRef(null);
+  const visibleSparks = Array.from({ length: 3 }, (_, index) => {
+    const sparkIndex = (sparkPage + index) % sparkPrompts.length;
+    return sparkPrompts[sparkIndex];
+  });
 
   useEffect(() => {
     if (!success) return;
@@ -297,12 +409,27 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
     return () => window.clearTimeout(timer);
   }, [success, onSuccessSettled]);
 
-  const handleTextChange = (event) => {
-    setText(event.target.value);
+  const resizeTextarea = useCallback(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
     }
+  }, []);
+
+  const handleTextChange = (event) => {
+    setText(event.target.value);
+    resizeTextarea();
+  };
+
+  const borrowSpark = (prompt) => {
+    audioManager.play("open");
+    setText(prompt);
+    window.requestAnimationFrame(resizeTextarea);
+  };
+
+  const shuffleSparks = () => {
+    audioManager.play("draw");
+    setSparkPage((current) => (current + 3) % sparkPrompts.length);
   };
 
   const submitQuestion = async (event) => {
@@ -313,9 +440,7 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
 
     if (saved) {
       setText("");
-      if (textareaRef.current) {
-        textareaRef.current.style.height = "auto";
-      }
+      window.requestAnimationFrame(resizeTextarea);
     }
   };
 
@@ -343,9 +468,36 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
             ref={textareaRef}
             value={text}
             onChange={handleTextChange}
-            placeholder="What's on your mind?..."
-            className="cosmic-textarea min-h-64 w-full resize-none rounded-[1.5rem] border border-sky-200/10 bg-white/[0.04] p-5 font-serif text-3xl leading-tight text-stone-50 outline-none transition placeholder:text-blue-100/30 focus:border-sky-200/40 focus:bg-white/[0.07] sm:p-7 sm:text-5xl"
+            placeholder="What's on your mind?"
+            className="cosmic-textarea min-h-56 w-full resize-none rounded-[1.5rem] border border-sky-200/10 bg-white/[0.04] p-5 font-serif text-3xl leading-tight text-stone-50 outline-none transition placeholder:text-blue-100/30 focus:border-sky-200/40 focus:bg-white/[0.07] sm:min-h-64 sm:p-7 sm:text-5xl"
           />
+        </div>
+
+        <div className="mt-5 rounded-[1.5rem] border border-white/10 bg-white/[0.045] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs uppercase tracking-[0.28em] text-blue-100/50">
+              Borrow A Spark
+            </p>
+            <button
+              type="button"
+              onClick={shuffleSparks}
+              className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/70 transition hover:text-amber-50"
+            >
+              Shuffle
+            </button>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            {visibleSparks.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => borrowSpark(prompt)}
+                className="spark-button"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -419,9 +571,13 @@ function VaultView({
   onNext,
   onOpenQuestion,
   onReload,
+  onResetStarterDeck,
+  onSurprise,
   onSwitchView,
 }) {
   const unopenedCount = questions.filter((question) => !question.is_opened).length;
+  const personalCount = questions.filter((question) => question.source !== "starter").length;
+  const starterCount = questions.filter((question) => question.source === "starter").length;
 
   return (
     <motion.section
@@ -431,26 +587,39 @@ function VaultView({
       transition={{ duration: 0.5, ease: "easeOut" }}
       className="flex-1 py-10"
     >
-      <div className="mb-7 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+      <div className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-xs uppercase tracking-[0.45em] text-amber-100/50">
             The Vault
           </p>
-          <h2 className="mt-2 font-serif text-4xl text-stone-50 sm:text-6xl">
+          <h2 className="mt-2 max-w-3xl font-serif text-4xl leading-none text-stone-50 sm:text-6xl">
             Choose a star, then stay.
           </h2>
           <p className="mt-4 max-w-2xl leading-7 text-blue-100/60">
-            {unopenedCount} unopened {unopenedCount === 1 ? "question" : "questions"} waiting
-            in the dark.
+            {unopenedCount} unopened {unopenedCount === 1 ? "question" : "questions"} waiting,
+            with a starter constellation for nights when the sky begins empty.
           </p>
         </div>
 
         <div className="flex flex-wrap gap-3">
           <button
+            disabled={isLoading || !questions.length}
+            onClick={onSurprise}
+            className="rounded-full bg-sky-100 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-slate-950 shadow-aurora transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Draw Tonight
+          </button>
+          <button
             onClick={onReload}
             className="rounded-full border border-white/10 bg-white/[0.06] px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-blue-50/75 transition hover:border-white/25 hover:bg-white/[0.1]"
           >
             Refresh
+          </button>
+          <button
+            onClick={onResetStarterDeck}
+            className="rounded-full border border-white/10 bg-white/[0.06] px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-blue-50/75 transition hover:border-white/25 hover:bg-white/[0.1]"
+          >
+            Reset
           </button>
           <button
             onClick={onSwitchView}
@@ -461,9 +630,17 @@ function VaultView({
         </div>
       </div>
 
+      <VaultSignalStrip
+        personalCount={personalCount}
+        starterCount={starterCount}
+        unopenedCount={unopenedCount}
+      />
+
+      <RitualStrip />
+
       {!hasSupabaseConfig && (
         <div className="mb-5 rounded-3xl border border-sky-100/10 bg-sky-100/[0.06] px-5 py-4 text-sm leading-6 text-blue-50/65">
-          Supabase is not configured yet, so the vault is using demo stars. Add
+          Supabase is not configured yet, so added questions stay in this browser session. Add
           `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to `.env` when you are ready.
         </div>
       )}
@@ -505,10 +682,44 @@ function VaultView({
   );
 }
 
+function VaultSignalStrip({ personalCount, starterCount, unopenedCount }) {
+  const signals = [
+    { label: "Unopened", value: unopenedCount },
+    { label: "Starter", value: starterCount },
+    { label: "Yours", value: personalCount },
+  ];
+
+  return (
+    <div className="vault-signals">
+      {signals.map((signal) => (
+        <div key={signal.label}>
+          <span>{signal.label}</span>
+          <strong>{signal.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RitualStrip() {
+  return (
+    <div className="ritual-strip">
+      {ritualBeats.map((beat) => (
+        <div key={beat.title}>
+          <span>{beat.title}</span>
+          <p>{beat.copy}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function QuestionCard({ index, question, onClick }) {
   const isOpened = Boolean(question.is_opened);
-  const heightClass = ["min-h-44", "min-h-52", "min-h-48", "min-h-60"][index % 4];
+  const heightClass = ["min-h-44", "min-h-52", "min-h-48", "min-h-56"][index % 4];
   const stateClass = isOpened ? "question-card-opened" : "unopened-glow";
+  const category = question.category ?? "Yours";
+  const intensity = question.intensity ?? "Personal";
 
   return (
     <motion.button
@@ -520,11 +731,19 @@ function QuestionCard({ index, question, onClick }) {
     >
       <span className="absolute right-5 top-5 h-12 w-12 rounded-full bg-sky-200/10 blur-xl" />
       <span className="absolute -bottom-5 -left-5 h-24 w-24 rounded-full bg-amber-200/10 blur-2xl" />
-      <span className="relative z-10 text-xs uppercase tracking-[0.38em] text-blue-100/45">
-        Star {String(index + 1).padStart(2, "0")}
+      <span className="relative z-10 flex items-start justify-between gap-3">
+        <span className="text-xs uppercase tracking-[0.28em] text-blue-100/45">
+          Star {String(index + 1).padStart(2, "0")}
+        </span>
+        <span className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1 text-[0.65rem] uppercase tracking-[0.18em] text-amber-100/70">
+          {intensity}
+        </span>
       </span>
-      <span className="relative z-10 mt-auto font-serif text-2xl leading-tight text-stone-50">
-        {isOpened ? "Opened" : "Mystery question"}
+      <span className="relative z-10 mt-8 text-sm uppercase tracking-[0.28em] text-sky-100/48">
+        {category}
+      </span>
+      <span className="relative z-10 mt-auto line-clamp-4 font-serif text-2xl leading-tight text-stone-50">
+        {isOpened ? question.text : "Mystery question"}
       </span>
       <span className="relative z-10 mt-4 h-px w-16 bg-gradient-to-r from-transparent via-blue-100/50 to-transparent" />
     </motion.button>
@@ -533,11 +752,25 @@ function QuestionCard({ index, question, onClick }) {
 
 function QuestionModal({ question, onClose, onNext }) {
   const [finished, setFinished] = useState(false);
+  const [duration, setDuration] = useState(
+    question.intensity === "Brave" || question.intensity === "Deep" ? 90 : 60,
+  );
 
   const handleComplete = useCallback(() => {
     audioManager.play("timer");
     setFinished(true);
   }, []);
+
+  useEffect(() => {
+    setFinished(false);
+    setDuration(question.intensity === "Brave" || question.intensity === "Deep" ? 90 : 60);
+  }, [question.id, question.intensity]);
+
+  const chooseDuration = (nextDuration) => {
+    audioManager.play("submit");
+    setFinished(false);
+    setDuration(nextDuration);
+  };
 
   return (
     <motion.div
@@ -565,7 +798,7 @@ function QuestionModal({ question, onClose, onNext }) {
             transition={{ delay: 0.18, duration: 0.55 }}
             className="text-xs uppercase tracking-[0.42em] text-sky-100/45"
           >
-            Open question
+            {question.category ?? "Open"} / {question.intensity ?? "Personal"}
           </motion.p>
           <motion.h3
             initial={{ opacity: 0, y: 14 }}
@@ -577,7 +810,19 @@ function QuestionModal({ question, onClose, onNext }) {
           </motion.h3>
 
           <div className="mt-8 flex flex-col items-center gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <CountdownTimer duration={60} onComplete={handleComplete} />
+            <CountdownTimer key={`${question.id}-${duration}`} duration={duration} onComplete={handleComplete} />
+            <div className="duration-switch" aria-label="Timer length">
+              {[45, 60, 90].map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => chooseDuration(option)}
+                  className={duration === option ? "is-active" : ""}
+                >
+                  {option}s
+                </button>
+              ))}
+            </div>
             <AnimatePresence>
               {finished && (
                 <motion.p
@@ -670,7 +915,9 @@ function CountdownTimer({ duration, onComplete }) {
         <span className="absolute font-serif text-3xl text-stone-50">{remaining}</span>
       </div>
       <div>
-        <p className="text-xs uppercase tracking-[0.35em] text-blue-100/45">One minute</p>
+        <p className="text-xs uppercase tracking-[0.35em] text-blue-100/45">
+          {duration} seconds
+        </p>
         <p className="mt-2 max-w-48 text-sm leading-6 text-blue-100/60">
           Let the answer breathe before the next star opens.
         </p>

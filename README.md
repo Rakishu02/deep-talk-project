@@ -17,14 +17,8 @@ A romantic, interactive deep-talk web app for couples built with React, Vite, Ta
    VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
 
-3. Put your audio files in `public/audio/`:
-
-   ```text
-   public/audio/bgm.mp3
-   public/audio/chime.mp3
-   public/audio/card-flip.mp3
-   public/audio/bell.mp3
-   ```
+3. Audio is synthesized in the browser after the first tap, so the app no longer
+   needs uploaded mp3 assets to feel alive.
 
 4. Run the app:
 
@@ -45,3 +39,7 @@ The app expects a `questions` table with:
 
 When a question is submitted, the app inserts `{ text, is_opened: false }`.
 When a vault card is closed or skipped forward, the app updates `is_opened` to `true`.
+
+The deployed app also ships with a built-in starter deck. Those starter questions
+do not need database rows, and their opened state is stored in each visitor's
+browser.

@@ -1,4 +1,7 @@
-Drop the final audio assets here using these placeholder names:
+The app now uses Web Audio synthesis for ambience and interaction sounds.
+
+These old placeholder mp3 names can stay here harmlessly, but they are no longer
+required for the experience:
 
 - `bgm.mp3`
 - `chime.mp3`
