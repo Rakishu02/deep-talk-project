@@ -301,10 +301,10 @@ function App() {
   }
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[#050716] text-stone-50">
+    <div className="relative min-h-[100dvh] overflow-hidden bg-[#050716] text-stone-50">
       <CosmicBackdrop />
 
-      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 pb-24 pt-5 sm:px-8 sm:pb-8 sm:pt-6">
+      <main className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-6xl flex-col px-4 pb-24 pt-5 sm:px-8 sm:pb-8 sm:pt-6">
         <TopBar
           muted={muted}
           view={view}
@@ -349,13 +349,13 @@ function App() {
 
 function LandingScreen({ onBegin }) {
   return (
-    <div className="relative flex min-h-screen overflow-hidden bg-[#030513] px-5 text-stone-50">
+    <div className="relative flex min-h-[100dvh] overflow-hidden bg-[#030513] px-5 text-stone-50">
       <CosmicBackdrop />
       <motion.div
         initial={{ opacity: 0, y: 18 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.7, ease: "easeOut" }}
-        className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-end pb-10 pt-16 sm:justify-center sm:pb-16"
+        className="relative z-10 mx-auto flex min-h-[100dvh] w-full max-w-6xl flex-col justify-end pb-10 pt-16 sm:justify-center sm:pb-16"
       >
         <p className="mb-4 max-w-fit border-b border-sky-100/20 pb-3 text-xs uppercase tracking-[0.34em] text-sky-100/65 sm:tracking-[0.48em]">
           Private question box
