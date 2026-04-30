@@ -1,0 +1,102 @@
+@import url("https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    min-height: 100%;
+    background: #030513;
+  }
+
+  body {
+    min-height: 100%;
+    margin: 0;
+    overflow-x: hidden;
+    font-family: theme("fontFamily.sans");
+    background: #030513;
+  }
+
+  button,
+  textarea {
+    font: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgba(186, 220, 255, 0.28);
+    color: #fffaf2;
+  }
+}
+
+@layer components {
+  .glass-card {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 2.5rem;
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.045)),
+      rgba(9, 13, 35, 0.68);
+    box-shadow: 0 24px 80px rgba(3, 6, 20, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(28px);
+  }
+
+  .cosmic-textarea {
+    box-shadow: inset 0 0 50px rgba(123, 192, 255, 0.08), 0 0 38px rgba(118, 168, 255, 0.08);
+  }
+
+  .question-card {
+    position: relative;
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 2rem;
+    padding: 1.25rem;
+    text-align: left;
+    background:
+      linear-gradient(150deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.035)),
+      radial-gradient(circle at 20% 0%, rgba(129, 211, 255, 0.18), transparent 35%),
+      rgba(6, 10, 28, 0.74);
+    box-shadow: 0 24px 60px rgba(2, 5, 18, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(22px);
+    transition:
+      border-color 180ms ease,
+      opacity 180ms ease,
+      filter 180ms ease,
+      background 180ms ease;
+  }
+
+  .question-card::after {
+    content: "";
+    position: absolute;
+    inset: auto 1.25rem 1.25rem auto;
+    width: 3rem;
+    height: 3rem;
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0 0 1.35rem 0;
+    opacity: 0.7;
+  }
+
+  .question-card:hover {
+    border-color: rgba(210, 235, 255, 0.34);
+    background:
+      linear-gradient(150deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.05)),
+      radial-gradient(circle at 20% 0%, rgba(129, 211, 255, 0.24), transparent 35%),
+      rgba(6, 10, 28, 0.78);
+  }
+
+  .question-card-opened {
+    opacity: 0.38;
+    filter: saturate(0.7);
+  }
+}
