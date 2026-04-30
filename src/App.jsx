@@ -1,74 +1,68 @@
-import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ritualBeats, sparkPrompts, starterQuestions } from "./data/questionDeck";
+import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { QUESTION_BOX_UNLOCKED } from "./config/questionBoxSettings";
+import { sparkPrompts } from "./data/sparkPrompts";
 import { audioManager } from "./lib/audioManager";
 import { hasSupabaseConfig, supabase } from "./lib/supabase";
 
-const STARTER_OPENED_KEY = "deep-talk-vault:starter-opened";
+const QUESTION_CATEGORIES = [
+  {
+    value: "self",
+    label: "About Ourselves",
+    shortLabel: "Self",
+    description: "Feelings, dreams, habits, and things that are usually hard to open up.",
+  },
+  {
+    value: "relationship",
+    label: "About Our Relationship",
+    shortLabel: "Us",
+    description: "How we love, argue, repair, and grow together.",
+  },
+];
 
-function getOpenedStarterIds() {
-  if (typeof window === "undefined") return new Set();
+const starSeeds = Array.from({ length: 26 }, (_, index) => ({
+  id: index,
+  left: `${(index * 37 + 11) % 100}%`,
+  top: `${(index * 53 + 7) % 100}%`,
+  size: 1.5 + (index % 4),
+  delay: `${(index % 8) * 0.7}s`,
+  duration: `${7 + (index % 6)}s`,
+}));
 
-  try {
-    const rawValue = window.localStorage.getItem(STARTER_OPENED_KEY);
-    const parsedValue = rawValue ? JSON.parse(rawValue) : [];
-    return new Set(Array.isArray(parsedValue) ? parsedValue : []);
-  } catch {
-    return new Set();
+function shuffleQuestions(items) {
+  const shuffled = [...items];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
   }
-}
 
-function saveOpenedStarterId(questionId) {
-  if (typeof window === "undefined") return;
-
-  const openedIds = getOpenedStarterIds();
-  openedIds.add(questionId);
-  window.localStorage.setItem(STARTER_OPENED_KEY, JSON.stringify([...openedIds]));
-}
-
-function resetOpenedStarterIds() {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(STARTER_OPENED_KEY);
-}
-
-function buildStarterDeck() {
-  const openedIds = getOpenedStarterIds();
-
-  return starterQuestions.map((question) => ({
-    ...question,
-    created_at: null,
-    is_opened: openedIds.has(question.id),
-    source: "starter",
-  }));
-}
-
-function normalizeSavedQuestion(question) {
-  return {
-    ...question,
-    category: "Yours",
-    intensity: "Personal",
-    source: "supabase",
-  };
+  return shuffled;
 }
 
 function pickRandom(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-const starSeeds = Array.from({ length: 72 }, (_, index) => ({
-  id: index,
-  left: `${Math.random() * 100}%`,
-  top: `${Math.random() * 100}%`,
-  size: 2 + Math.random() * 5,
-  delay: Math.random() * 8,
-  duration: 7 + Math.random() * 10,
-  drift: 8 + Math.random() * 28,
-}));
+function normalizeQuestion(question, fallbackCategory = "relationship") {
+  const categoryValues = QUESTION_CATEGORIES.map((category) => category.value);
+
+  return {
+    ...question,
+    category: categoryValues.includes(question.category) ? question.category : fallbackCategory,
+    is_opened: Boolean(question.is_opened),
+    source: question.source ?? "supabase",
+  };
+}
+
+function isMissingCategoryColumn(error) {
+  return error?.message?.toLowerCase().includes("category");
+}
 
 function App() {
   const [hasBegun, setHasBegun] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [view, setView] = useState("vault");
+  const [view, setView] = useState(QUESTION_BOX_UNLOCKED ? "box" : "write");
   const [questions, setQuestions] = useState([]);
   const [activeQuestion, setActiveQuestion] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -77,11 +71,31 @@ function App() {
 
   const beginExperience = async () => {
     await audioManager.begin();
+    audioManager.play("click");
     setHasBegun(true);
+  };
+
+  const changeView = (nextView) => {
+    if (nextView === "box" && !QUESTION_BOX_UNLOCKED) {
+      audioManager.play("locked");
+      setView("write");
+      return;
+    }
+
+    audioManager.play("click");
+    setView(nextView);
   };
 
   const toggleMuted = () => {
     const nextMuted = !muted;
+    if (!nextMuted) {
+      setMuted(nextMuted);
+      audioManager.setMuted(nextMuted);
+      window.setTimeout(() => audioManager.play("click"), 40);
+      return;
+    }
+
+    audioManager.play("click");
     setMuted(nextMuted);
     audioManager.setMuted(nextMuted);
   };
@@ -90,104 +104,146 @@ function App() {
     setError("");
 
     if (!hasSupabaseConfig) {
-      setQuestions((current) => {
-        const localQuestions = current.filter((question) => question.source === "local");
-        return [...localQuestions, ...buildStarterDeck()];
-      });
+      setQuestions((current) => shuffleQuestions(current.filter((question) => question.source === "local")));
       return;
     }
 
     setIsLoading(true);
-    const { data, error: loadError } = await supabase
+
+    const withCategory = await supabase
       .from("questions")
-      .select("id, text, is_opened, created_at")
-      .order("id", { ascending: true });
+      .select("id, text, category, is_opened, created_at")
+      .order("created_at", { ascending: false });
 
-    setIsLoading(false);
-
-    if (loadError) {
-      setError("The vault could not reach Supabase. Check your keys and table policy.");
-      setQuestions((current) => (current.length ? current : buildStarterDeck()));
+    if (!withCategory.error) {
+      setQuestions(shuffleQuestions((withCategory.data ?? []).map((question) => normalizeQuestion(question))));
+      setIsLoading(false);
       return;
     }
 
-    setQuestions([...(data ?? []).map(normalizeSavedQuestion), ...buildStarterDeck()]);
+    if (!isMissingCategoryColumn(withCategory.error)) {
+      setError("Question Box belum bisa terhubung ke Supabase. Cek keys dan table policy.");
+      setIsLoading(false);
+      return;
+    }
+
+    const withoutCategory = await supabase
+      .from("questions")
+      .select("id, text, is_opened, created_at")
+      .order("created_at", { ascending: false });
+
+    if (withoutCategory.error) {
+      setError("Question Box belum bisa terhubung ke Supabase. Cek keys dan table policy.");
+      setIsLoading(false);
+      return;
+    }
+
+    setQuestions(
+      shuffleQuestions(
+        (withoutCategory.data ?? []).map((question) => normalizeQuestion(question, "relationship")),
+      ),
+    );
+    setIsLoading(false);
   }, []);
 
   useEffect(() => {
-    if (view === "vault") {
+    if (hasBegun) {
       void loadQuestions();
     }
-  }, [loadQuestions, view]);
+  }, [hasBegun, loadQuestions]);
 
   const clearSuccess = useCallback(() => setSuccess(""), []);
 
-  const addQuestion = async (text) => {
+  const addQuestion = async ({ text, category }) => {
     const trimmedText = text.trim();
 
-    if (!trimmedText) return false;
+    if (!trimmedText || !category) return false;
 
     audioManager.play("submit");
     setError("");
 
     if (!hasSupabaseConfig) {
-      setQuestions((current) => [
-        {
-          id: `local-${Date.now()}`,
-          text: trimmedText,
-          category: "Yours",
-          intensity: "Personal",
-          is_opened: false,
-          source: "local",
-        },
-        ...current,
-      ]);
-      setSuccess("Added to tonight");
+      setQuestions((current) =>
+        shuffleQuestions([
+          normalizeQuestion({
+            id: `local-${Date.now()}`,
+            text: trimmedText,
+            category,
+            is_opened: false,
+            source: "local",
+          }),
+          ...current,
+        ]),
+      );
+      setSuccess("Saved. Question count increased by one.");
       return true;
     }
 
-    const { data, error: insertError } = await supabase
+    const payload = { text: trimmedText, category, is_opened: false };
+    const inserted = await supabase
+      .from("questions")
+      .insert(payload)
+      .select("id, text, category, is_opened, created_at")
+      .single();
+
+    if (!inserted.error) {
+      setQuestions((current) =>
+        shuffleQuestions([normalizeQuestion(inserted.data), ...current]),
+      );
+      setSuccess("Saved. Question count increased by one.");
+      return true;
+    }
+
+    if (!isMissingCategoryColumn(inserted.error)) {
+      setError("That question could not be saved yet. Supabase may need insert permission.");
+      return false;
+    }
+
+    const fallbackInsert = await supabase
       .from("questions")
       .insert({ text: trimmedText, is_opened: false })
       .select("id, text, is_opened, created_at")
       .single();
 
-    if (insertError) {
-      setError("That thought could not be saved yet. Supabase may need insert permission.");
+    if (fallbackInsert.error) {
+      setError("That question could not be saved yet. Supabase may need insert permission.");
       return false;
     }
 
-    setQuestions((current) => [normalizeSavedQuestion(data), ...current]);
-    setSuccess("Added to tonight");
+    setQuestions((current) =>
+      shuffleQuestions([normalizeQuestion(fallbackInsert.data, category), ...current]),
+    );
+    setSuccess("Saved. Add the category column in Supabase so the category persists too.");
     return true;
   };
 
   const openQuestion = (question) => {
+    if (!QUESTION_BOX_UNLOCKED) {
+      audioManager.play("locked");
+      return;
+    }
+
     audioManager.play("open");
     setActiveQuestion(question);
   };
 
-  const openSurpriseQuestion = () => {
+  const drawQuestion = () => {
+    if (!QUESTION_BOX_UNLOCKED) {
+      audioManager.play("locked");
+      return;
+    }
+
     const unopenedQuestions = questions.filter((question) => !question.is_opened);
     const candidates = unopenedQuestions.length ? unopenedQuestions : questions;
 
     if (!candidates.length) {
-      setError("Add a question first, then the vault can draw one for you.");
+      audioManager.play("locked");
+      setError("Add a question first, then you can draw one later.");
       return;
     }
 
     audioManager.play("draw");
     setActiveQuestion(pickRandom(candidates));
-  };
-
-  const resetStarterDeck = () => {
-    resetOpenedStarterIds();
-    audioManager.play("submit");
-    setQuestions((current) =>
-      current.map((question) =>
-        question.source === "starter" ? { ...question, is_opened: false } : question,
-      ),
-    );
   };
 
   const markQuestionOpened = async (questionId) => {
@@ -199,11 +255,6 @@ function App() {
       ),
     );
 
-    if (selectedQuestion?.source === "starter") {
-      saveOpenedStarterId(questionId);
-      return;
-    }
-
     if (!hasSupabaseConfig || selectedQuestion?.source !== "supabase") return;
 
     const { error: updateError } = await supabase
@@ -212,11 +263,13 @@ function App() {
       .eq("id", questionId);
 
     if (updateError) {
-      setError("The card opened locally, but Supabase could not mark it as opened.");
+      setError("It opened here, but Supabase could not mark it as opened yet.");
     }
   };
 
   const closeActiveQuestion = async () => {
+    audioManager.play("click");
+
     if (activeQuestion) {
       await markQuestionOpened(activeQuestion.id);
     }
@@ -227,19 +280,20 @@ function App() {
   const openNextQuestion = async () => {
     if (!activeQuestion) return;
 
-    const nextQuestion = questions.find(
+    await markQuestionOpened(activeQuestion.id);
+
+    const nextCandidates = questions.filter(
       (question) => question.id !== activeQuestion.id && !question.is_opened,
     );
 
-    await markQuestionOpened(activeQuestion.id);
-
-    if (!nextQuestion) {
+    if (!nextCandidates.length) {
+      audioManager.play("click");
       setActiveQuestion(null);
       return;
     }
 
     audioManager.play("open");
-    setActiveQuestion(nextQuestion);
+    setActiveQuestion(pickRandom(nextCandidates));
   };
 
   if (!hasBegun) {
@@ -250,47 +304,44 @@ function App() {
     <div className="relative min-h-screen overflow-hidden bg-[#050716] text-stone-50">
       <CosmicBackdrop />
 
-      <div className="pointer-events-none fixed inset-0 z-0 bg-[radial-gradient(circle_at_50%_0%,rgba(124,134,255,0.18),transparent_38%),radial-gradient(circle_at_12%_80%,rgba(255,180,126,0.10),transparent_28%)]" />
-
-      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 pb-28 pt-5 sm:px-8 sm:pb-8 sm:pt-6">
+      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 pb-24 pt-5 sm:px-8 sm:pb-8 sm:pt-6">
         <TopBar
           muted={muted}
           view={view}
-          onChangeView={setView}
+          onChangeView={changeView}
           onToggleMuted={toggleMuted}
         />
 
-        <LayoutGroup>
-          <AnimatePresence mode="wait">
-            {view === "write" ? (
-              <WriteView
-                key="write"
-                error={error}
-                success={success}
-                onSubmit={addQuestion}
-                onSuccessSettled={clearSuccess}
-                onSwitchView={() => setView("vault")}
-              />
-            ) : (
-              <VaultView
-                key="vault"
-                activeQuestion={activeQuestion}
-                error={error}
-                isLoading={isLoading}
-                questions={questions}
-                onClose={closeActiveQuestion}
-                onNext={openNextQuestion}
-                onOpenQuestion={openQuestion}
-                onReload={loadQuestions}
-                onResetStarterDeck={resetStarterDeck}
-                onSurprise={openSurpriseQuestion}
-                onSwitchView={() => setView("write")}
-              />
-            )}
-          </AnimatePresence>
-        </LayoutGroup>
+        <AnimatePresence mode="wait">
+          {view === "write" ? (
+            <WriteView
+              key="write"
+              error={error}
+              isLoading={isLoading}
+              questionCount={questions.length}
+              success={success}
+              onSubmit={addQuestion}
+              onSuccessSettled={clearSuccess}
+              onSwitchView={() => changeView("box")}
+            />
+          ) : (
+            <QuestionBoxView
+              key="box"
+              activeQuestion={activeQuestion}
+              error={error}
+              isLoading={isLoading}
+              questions={questions}
+              onClose={closeActiveQuestion}
+              onDraw={drawQuestion}
+              onNext={openNextQuestion}
+              onOpenQuestion={openQuestion}
+              onReload={loadQuestions}
+              onSwitchView={() => changeView("write")}
+            />
+          )}
+        </AnimatePresence>
 
-        <MobileDock view={view} onChangeView={setView} />
+        {QUESTION_BOX_UNLOCKED && <MobileDock view={view} onChangeView={changeView} />}
       </main>
     </div>
   );
@@ -301,38 +352,29 @@ function LandingScreen({ onBegin }) {
     <div className="relative flex min-h-screen overflow-hidden bg-[#030513] px-5 text-stone-50">
       <CosmicBackdrop />
       <motion.div
-        initial={{ opacity: 0, y: 24, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 1.1, ease: [0.16, 1, 0.3, 1] }}
+        initial={{ opacity: 0, y: 18 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.7, ease: "easeOut" }}
         className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-end pb-10 pt-16 sm:justify-center sm:pb-16"
       >
-        <p className="mb-4 max-w-fit border-b border-sky-100/20 pb-3 text-xs uppercase tracking-[0.38em] text-sky-100/65 sm:tracking-[0.55em]">
-          Private ritual for two voices
+        <p className="mb-4 max-w-fit border-b border-sky-100/20 pb-3 text-xs uppercase tracking-[0.34em] text-sky-100/65 sm:tracking-[0.48em]">
+          Private question box
         </p>
         <h1 className="max-w-4xl font-serif text-6xl font-semibold leading-none text-stone-50 sm:text-8xl">
-          Deep Talk Vault
+          Our Deep Talk
         </h1>
         <p className="mt-6 max-w-2xl text-balance text-base leading-8 text-blue-100/72 sm:text-xl sm:leading-9">
-          A pocket-sized night sky of questions, soft timers, and tiny sounds for
-          conversations that deserve more than a quick reply.
+          Write the questions first, collect them slowly, then open the Question Box when the time feels right.
         </p>
         <div className="mt-9 flex flex-col gap-4 sm:flex-row sm:items-center">
           <motion.button
-            whileHover={{ scale: 1.04 }}
+            whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.98 }}
             onClick={onBegin}
-            className="rounded-full border border-sky-100/25 bg-sky-100 px-8 py-4 text-sm font-semibold uppercase tracking-[0.24em] text-slate-950 shadow-aurora transition hover:bg-white"
+            className="rounded-full border border-sky-100/25 bg-sky-100 px-8 py-4 text-sm font-semibold uppercase tracking-[0.2em] text-slate-950 shadow-aurora transition hover:bg-white"
           >
-            Begin The Night
+            Begin
           </motion.button>
-          <p className="max-w-xs text-sm leading-6 text-blue-100/48">
-            Audio unlocks on tap. The vault already has a starter deck inside.
-          </p>
-        </div>
-        <div className="mt-12 grid gap-3 text-xs uppercase tracking-[0.22em] text-blue-100/55 sm:grid-cols-3">
-          <span className="landing-signal">24 questions</span>
-          <span className="landing-signal">One-minute ritual</span>
-          <span className="landing-signal">Phone-ready</span>
         </div>
       </motion.div>
     </div>
@@ -343,22 +385,24 @@ function TopBar({ muted, view, onChangeView, onToggleMuted }) {
   return (
     <header className="flex items-center justify-between gap-4">
       <div>
-        <p className="text-xs uppercase tracking-[0.32em] text-blue-100/50 sm:tracking-[0.42em]">
+        <p className="text-xs uppercase tracking-[0.28em] text-blue-100/50 sm:tracking-[0.38em]">
           Twilight Ritual
         </p>
         <h1 className="mt-2 font-serif text-3xl text-stone-50 sm:text-4xl">
-          Deep Talk Vault
+          Question Box
         </h1>
       </div>
 
       <div className="flex items-center gap-3">
-        <div className="hidden sm:block">
-          <ModeSwitch view={view} onChangeView={onChangeView} />
-        </div>
+        {QUESTION_BOX_UNLOCKED && (
+          <div className="hidden sm:block">
+            <ModeSwitch view={view} onChangeView={onChangeView} />
+          </div>
+        )}
         <button
           aria-label={muted ? "Unmute audio" : "Mute audio"}
           onClick={onToggleMuted}
-          className="rounded-full border border-white/10 bg-white/[0.07] p-3 text-blue-50 shadow-glass backdrop-blur-md transition hover:border-white/25 hover:bg-white/[0.12]"
+          className="icon-button"
         >
           {muted ? <MutedIcon /> : <SoundIcon />}
         </button>
@@ -370,14 +414,14 @@ function TopBar({ muted, view, onChangeView, onToggleMuted }) {
 function ModeSwitch({ view, onChangeView }) {
   return (
     <nav className="mode-switch" aria-label="Mode switch">
-      {["vault", "write"].map((mode) => (
+      {["write", "box"].map((mode) => (
         <button
           key={mode}
           type="button"
           onClick={() => onChangeView(mode)}
           className={view === mode ? "is-active" : ""}
         >
-          {mode === "vault" ? "Vault" : "Write"}
+          {mode === "write" ? "Write" : "Question Box"}
         </button>
       ))}
     </nav>
@@ -392,20 +436,33 @@ function MobileDock({ view, onChangeView }) {
   );
 }
 
-function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView }) {
+function WriteView({
+  error,
+  isLoading,
+  questionCount,
+  success,
+  onSubmit,
+  onSuccessSettled,
+  onSwitchView,
+}) {
   const [text, setText] = useState("");
+  const [category, setCategory] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [sparkPage, setSparkPage] = useState(0);
   const textareaRef = useRef(null);
-  const visibleSparks = Array.from({ length: 3 }, (_, index) => {
-    const sparkIndex = (sparkPage + index) % sparkPrompts.length;
-    return sparkPrompts[sparkIndex];
-  });
+  const visibleSparks = useMemo(
+    () =>
+      Array.from({ length: 4 }, (_, index) => {
+        const sparkIndex = (sparkPage + index) % sparkPrompts.length;
+        return sparkPrompts[sparkIndex];
+      }),
+    [sparkPage],
+  );
 
   useEffect(() => {
     if (!success) return;
 
-    const timer = window.setTimeout(onSuccessSettled, 2400);
+    const timer = window.setTimeout(onSuccessSettled, 2600);
     return () => window.clearTimeout(timer);
   }, [success, onSuccessSettled]);
 
@@ -418,48 +475,68 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
 
   const handleTextChange = (event) => {
     setText(event.target.value);
-    resizeTextarea();
+    window.requestAnimationFrame(resizeTextarea);
+  };
+
+  const chooseCategory = (nextCategory) => {
+    audioManager.play("click");
+    setCategory(nextCategory);
   };
 
   const borrowSpark = (prompt) => {
-    audioManager.play("open");
+    audioManager.play("click");
     setText(prompt);
     window.requestAnimationFrame(resizeTextarea);
   };
 
   const shuffleSparks = () => {
     audioManager.play("draw");
-    setSparkPage((current) => (current + 3) % sparkPrompts.length);
+    setSparkPage((current) => (current + 4) % sparkPrompts.length);
   };
 
   const submitQuestion = async (event) => {
     event.preventDefault();
     setIsSaving(true);
-    const saved = await onSubmit(text);
+    const saved = await onSubmit({ text, category });
     setIsSaving(false);
 
     if (saved) {
       setText("");
+      setCategory("");
       window.requestAnimationFrame(resizeTextarea);
     }
   };
 
   return (
     <motion.section
-      initial={{ opacity: 0, y: 18 }}
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -18 }}
-      transition={{ duration: 0.5, ease: "easeOut" }}
-      className="grid flex-1 place-items-center py-12"
+      exit={{ opacity: 0, y: -14 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+      className="grid flex-1 place-items-start py-8 lg:py-12"
     >
       <motion.form
         onSubmit={submitQuestion}
-        className="glass-card w-full max-w-3xl p-5 sm:p-7"
-        initial={{ rotateX: 8, opacity: 0 }}
-        animate={{ rotateX: 0, opacity: 1 }}
-        transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+        className="glass-card w-full max-w-4xl p-5 sm:p-7"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.35 }}
       >
-        <div className="rounded-[2rem] border border-white/10 bg-slate-950/20 p-4 shadow-inner shadow-sky-950/40 sm:p-6">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.28em] text-blue-100/48">
+              Add Question
+            </p>
+            <h2 className="mt-2 font-serif text-4xl leading-none text-stone-50 sm:text-5xl">
+              Write one question.
+            </h2>
+          </div>
+          <QuestionCountBadge count={questionCount} isLoading={isLoading} />
+        </div>
+
+        <CategoryPicker category={category} onChooseCategory={chooseCategory} />
+
+        <div className="mt-5 rounded-[1.5rem] border border-white/10 bg-slate-950/20 p-3 shadow-inner shadow-sky-950/30 sm:p-5">
           <label htmlFor="question" className="sr-only">
             Write a deep talk question
           </label>
@@ -468,25 +545,25 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
             ref={textareaRef}
             value={text}
             onChange={handleTextChange}
-            placeholder="What's on your mind?"
-            className="cosmic-textarea min-h-56 w-full resize-none rounded-[1.5rem] border border-sky-200/10 bg-white/[0.04] p-5 font-serif text-3xl leading-tight text-stone-50 outline-none transition placeholder:text-blue-100/30 focus:border-sky-200/40 focus:bg-white/[0.07] sm:min-h-64 sm:p-7 sm:text-5xl"
+            placeholder="Write the question here..."
+            className="cosmic-textarea min-h-52 w-full resize-none rounded-[1.15rem] border border-sky-200/10 bg-white/[0.04] p-5 font-serif text-3xl leading-tight text-stone-50 outline-none transition placeholder:text-blue-100/30 focus:border-sky-200/40 focus:bg-white/[0.07] sm:min-h-60 sm:p-7 sm:text-5xl"
           />
         </div>
 
-        <div className="mt-5 rounded-[1.5rem] border border-white/10 bg-white/[0.045] p-4">
+        <div className="mt-5 rounded-[1.25rem] border border-white/10 bg-white/[0.045] p-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs uppercase tracking-[0.28em] text-blue-100/50">
+            <p className="text-xs uppercase tracking-[0.24em] text-blue-100/50">
               Borrow A Spark
             </p>
             <button
               type="button"
               onClick={shuffleSparks}
-              className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/70 transition hover:text-amber-50"
+              className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/70 transition hover:text-amber-50"
             >
               Shuffle
             </button>
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
             {visibleSparks.map((prompt) => (
               <button
                 key={prompt}
@@ -501,160 +578,188 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
         </div>
 
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-h-7 text-sm">
-            <AnimatePresence mode="wait">
-              {success ? (
-                <motion.p
-                  key="success"
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -8 }}
-                  className="text-amber-100/85"
-                >
-                  {success}
-                </motion.p>
-              ) : error ? (
-                <motion.p
-                  key="error"
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -8 }}
-                  className="text-rose-200/85"
-                >
-                  {error}
-                </motion.p>
-              ) : (
-                <motion.p
-                  key="hint"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="text-blue-100/45"
-                >
-                  One question. One honest minute. No rush.
-                </motion.p>
-              )}
-            </AnimatePresence>
-          </div>
+          <StatusLine
+            category={category}
+            error={error}
+            success={success}
+            text={text}
+          />
 
           <motion.button
-            whileHover={{ scale: 1.03 }}
+            whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
-            disabled={isSaving || !text.trim()}
-            className="rounded-full bg-gradient-to-r from-sky-100 via-blue-100 to-amber-100 px-7 py-3 text-sm font-semibold uppercase tracking-[0.25em] text-slate-950 shadow-aurora transition disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={isSaving || !text.trim() || !category}
+            className="rounded-full bg-gradient-to-r from-sky-100 via-blue-100 to-amber-100 px-7 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-950 shadow-aurora transition disabled:cursor-not-allowed disabled:opacity-40"
           >
             {isSaving ? "Sending..." : "Add Star"}
           </motion.button>
         </div>
 
-        <div className="mt-7 flex justify-center border-t border-white/10 pt-5">
-          <button
-            type="button"
-            onClick={onSwitchView}
-            className="group text-sm uppercase tracking-[0.28em] text-blue-100/55 transition hover:text-blue-50"
-          >
-            Enter The Vault
-            <span className="mx-auto mt-2 block h-px w-10 bg-blue-100/30 transition group-hover:w-full group-hover:bg-blue-50/70" />
-          </button>
-        </div>
+        {QUESTION_BOX_UNLOCKED ? (
+          <div className="mt-7 flex justify-center border-t border-white/10 pt-5">
+            <button
+              type="button"
+              onClick={onSwitchView}
+              className="group text-sm uppercase tracking-[0.22em] text-blue-100/55 transition hover:text-blue-50"
+            >
+              Open Question Box
+              <span className="mx-auto mt-2 block h-px w-10 bg-blue-100/30 transition group-hover:w-full group-hover:bg-blue-50/70" />
+            </button>
+          </div>
+        ) : (
+          <div className="mt-7 rounded-[1.25rem] border border-amber-100/15 bg-amber-100/[0.07] px-4 py-3 text-sm leading-6 text-amber-50/72">
+            The Question Box is locked. For now, the flow only collects questions
+            and lets you watch the count grow.
+          </div>
+        )}
       </motion.form>
     </motion.section>
   );
 }
 
-function VaultView({
+function CategoryPicker({ category, onChooseCategory }) {
+  return (
+    <div className="category-picker" role="radiogroup" aria-label="Question category">
+      {QUESTION_CATEGORIES.map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          onClick={() => onChooseCategory(item.value)}
+          className={category === item.value ? "is-active" : ""}
+          role="radio"
+          aria-checked={category === item.value}
+        >
+          <span>{item.label}</span>
+          <small>{item.description}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function QuestionCountBadge({ count, isLoading }) {
+  return (
+    <div className="question-count">
+      <span>{isLoading ? "Loading" : "Number of Questions :"}</span>
+      <strong>{isLoading ? "..." : count}</strong>
+    </div>
+  );
+}
+
+function StatusLine({ category, error, success, text }) {
+  return (
+    <div className="min-h-7 text-sm">
+      <AnimatePresence mode="wait">
+        {success ? (
+          <motion.p
+            key="success"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="text-amber-100/85"
+          >
+            {success}
+          </motion.p>
+        ) : error ? (
+          <motion.p
+            key="error"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="text-rose-200/85"
+          >
+            {error}
+          </motion.p>
+        ) : !category ? (
+          <motion.p key="category" className="text-blue-100/45">
+            Choose a category first.
+          </motion.p>
+        ) : !text.trim() ? (
+          <motion.p key="text" className="text-blue-100/45">
+            Then write the question.
+          </motion.p>
+        ) : (
+          <motion.p key="ready" className="text-blue-100/45">
+            Ready to add to the Question Box.
+          </motion.p>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function QuestionBoxView({
   activeQuestion,
   error,
   isLoading,
   questions,
   onClose,
+  onDraw,
   onNext,
   onOpenQuestion,
   onReload,
-  onResetStarterDeck,
-  onSurprise,
   onSwitchView,
 }) {
+  if (!QUESTION_BOX_UNLOCKED) {
+    return <LockedQuestionBox questionCount={questions.length} onSwitchView={onSwitchView} />;
+  }
+
   const unopenedCount = questions.filter((question) => !question.is_opened).length;
-  const personalCount = questions.filter((question) => question.source !== "starter").length;
-  const starterCount = questions.filter((question) => question.source === "starter").length;
 
   return (
     <motion.section
-      initial={{ opacity: 0, y: 18 }}
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -18 }}
-      transition={{ duration: 0.5, ease: "easeOut" }}
-      className="flex-1 py-10"
+      exit={{ opacity: 0, y: -14 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+      className="flex-1 py-8 lg:py-10"
     >
       <div className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.45em] text-amber-100/50">
-            The Vault
-          </p>
           <h2 className="mt-2 max-w-3xl font-serif text-4xl leading-none text-stone-50 sm:text-6xl">
-            Choose a star, then stay.
+            Draw a question.
           </h2>
           <p className="mt-4 max-w-2xl leading-7 text-blue-100/60">
-            {unopenedCount} unopened {unopenedCount === 1 ? "question" : "questions"} waiting,
-            with a starter constellation for nights when the sky begins empty.
+            {unopenedCount} unopened from {questions.length} total.
           </p>
         </div>
 
         <div className="flex flex-wrap gap-3">
           <button
             disabled={isLoading || !questions.length}
-            onClick={onSurprise}
-            className="rounded-full bg-sky-100 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-slate-950 shadow-aurora transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
+            onClick={onDraw}
+            className="rounded-full bg-sky-100 px-5 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-slate-950 shadow-aurora transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
           >
-            Draw Tonight
+            Draw A Question
           </button>
           <button
-            onClick={onReload}
-            className="rounded-full border border-white/10 bg-white/[0.06] px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-blue-50/75 transition hover:border-white/25 hover:bg-white/[0.1]"
+            onClick={() => {
+              audioManager.play("click");
+              onReload();
+            }}
+            className="soft-button"
           >
             Refresh
           </button>
           <button
-            onClick={onResetStarterDeck}
-            className="rounded-full border border-white/10 bg-white/[0.06] px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-blue-50/75 transition hover:border-white/25 hover:bg-white/[0.1]"
-          >
-            Reset
-          </button>
-          <button
             onClick={onSwitchView}
-            className="rounded-full border border-amber-100/20 bg-amber-100/10 px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-amber-50/85 transition hover:border-amber-100/40 hover:bg-amber-100/15"
+            className="rounded-full border border-amber-100/20 bg-amber-100/10 px-5 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-amber-50/85 transition hover:border-amber-100/40 hover:bg-amber-100/15"
           >
             Write More
           </button>
         </div>
       </div>
 
-      <VaultSignalStrip
-        personalCount={personalCount}
-        starterCount={starterCount}
-        unopenedCount={unopenedCount}
-      />
-
-      <RitualStrip />
-
-      {!hasSupabaseConfig && (
-        <div className="mb-5 rounded-3xl border border-sky-100/10 bg-sky-100/[0.06] px-5 py-4 text-sm leading-6 text-blue-50/65">
-          Supabase is not configured yet, so added questions stay in this browser session. Add
-          `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to `.env` when you are ready.
-        </div>
-      )}
-
       {error && (
-        <div className="mb-5 rounded-3xl border border-rose-200/15 bg-rose-300/[0.07] px-5 py-4 text-sm text-rose-100/80">
+        <div className="mb-5 rounded-2xl border border-rose-200/15 bg-rose-300/[0.07] px-5 py-4 text-sm text-rose-100/80">
           {error}
         </div>
       )}
 
       {isLoading ? (
-        <LoadingVault />
+        <LoadingBox />
       ) : questions.length ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {questions.map((question, index) => (
             <QuestionCard
               key={question.id}
@@ -665,7 +770,7 @@ function VaultView({
           ))}
         </div>
       ) : (
-        <EmptyVault onSwitchView={onSwitchView} />
+        <EmptyBox onSwitchView={onSwitchView} />
       )}
 
       <AnimatePresence>
@@ -682,65 +787,52 @@ function VaultView({
   );
 }
 
-function VaultSignalStrip({ personalCount, starterCount, unopenedCount }) {
-  const signals = [
-    { label: "Unopened", value: unopenedCount },
-    { label: "Starter", value: starterCount },
-    { label: "Yours", value: personalCount },
-  ];
-
+function LockedQuestionBox({ questionCount, onSwitchView }) {
   return (
-    <div className="vault-signals">
-      {signals.map((signal) => (
-        <div key={signal.label}>
-          <span>{signal.label}</span>
-          <strong>{signal.value}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RitualStrip() {
-  return (
-    <div className="ritual-strip">
-      {ritualBeats.map((beat) => (
-        <div key={beat.title}>
-          <span>{beat.title}</span>
-          <p>{beat.copy}</p>
-        </div>
-      ))}
-    </div>
+    <motion.section
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -14 }}
+      className="grid flex-1 place-items-center py-12"
+    >
+      <div className="glass-card max-w-xl p-7 text-center sm:p-10">
+        <p className="text-xs uppercase tracking-[0.32em] text-amber-100/55">
+          Locked
+        </p>
+        <h2 className="mt-4 font-serif text-5xl leading-none text-stone-50">
+          Question Box is closed.
+        </h2>
+        <p className="mt-5 leading-7 text-blue-100/62">
+          There are {questionCount} questions saved. For now, opening questions is
+          turned off in the config.
+        </p>
+        <button
+          onClick={onSwitchView}
+          className="mt-7 rounded-full bg-sky-100 px-6 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-950"
+        >
+          Back To Write
+        </button>
+      </div>
+    </motion.section>
   );
 }
 
 function QuestionCard({ index, question, onClick }) {
   const isOpened = Boolean(question.is_opened);
-  const heightClass = ["min-h-44", "min-h-52", "min-h-48", "min-h-56"][index % 4];
-  const stateClass = isOpened ? "question-card-opened" : "unopened-glow";
-  const category = question.category ?? "Yours";
-  const intensity = question.intensity ?? "Personal";
+  const category = QUESTION_CATEGORIES.find((item) => item.value === question.category);
 
   return (
     <motion.button
-      layoutId={`question-card-${question.id}`}
       onClick={onClick}
-      whileHover={{ y: -8, rotate: index % 2 ? -1 : 1 }}
+      whileHover={{ y: -4 }}
       whileTap={{ scale: 0.98 }}
-      className={`question-card ${heightClass} ${stateClass}`}
+      className={`question-card ${isOpened ? "question-card-opened" : "question-card-unopened"}`}
     >
-      <span className="absolute right-5 top-5 h-12 w-12 rounded-full bg-sky-200/10 blur-xl" />
-      <span className="absolute -bottom-5 -left-5 h-24 w-24 rounded-full bg-amber-200/10 blur-2xl" />
       <span className="relative z-10 flex items-start justify-between gap-3">
-        <span className="text-xs uppercase tracking-[0.28em] text-blue-100/45">
+        <span className="text-xs uppercase tracking-[0.24em] text-blue-100/45">
           Star {String(index + 1).padStart(2, "0")}
         </span>
-        <span className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1 text-[0.65rem] uppercase tracking-[0.18em] text-amber-100/70">
-          {intensity}
-        </span>
-      </span>
-      <span className="relative z-10 mt-8 text-sm uppercase tracking-[0.28em] text-sky-100/48">
-        {category}
+        <span className="category-chip">{category?.shortLabel ?? "Question"}</span>
       </span>
       <span className="relative z-10 mt-auto line-clamp-4 font-serif text-2xl leading-tight text-stone-50">
         {isOpened ? question.text : "Mystery question"}
@@ -752,25 +844,15 @@ function QuestionCard({ index, question, onClick }) {
 
 function QuestionModal({ question, onClose, onNext }) {
   const [finished, setFinished] = useState(false);
-  const [duration, setDuration] = useState(
-    question.intensity === "Brave" || question.intensity === "Deep" ? 90 : 60,
-  );
+  const category = QUESTION_CATEGORIES.find((item) => item.value === question.category);
 
   const handleComplete = useCallback(() => {
-    audioManager.play("timer");
     setFinished(true);
   }, []);
 
   useEffect(() => {
     setFinished(false);
-    setDuration(question.intensity === "Brave" || question.intensity === "Deep" ? 90 : 60);
-  }, [question.id, question.intensity]);
-
-  const chooseDuration = (nextDuration) => {
-    audioManager.play("submit");
-    setFinished(false);
-    setDuration(nextDuration);
-  };
+  }, [question.id]);
 
   return (
     <motion.div
@@ -788,41 +870,32 @@ function QuestionModal({ question, onClose, onNext }) {
       />
 
       <motion.article
-        layoutId={`question-card-${question.id}`}
         className="glass-card relative z-10 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden p-5 sm:p-7"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.25, ease: "easeOut" }}
       >
-        <div className="rounded-[2rem] border border-white/10 bg-[#080b1d]/72 p-6 shadow-inner shadow-black/40 sm:p-10">
+        <div className="rounded-[1.5rem] border border-white/10 bg-[#080b1d]/72 p-6 shadow-inner shadow-black/35 sm:p-10">
           <motion.p
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.18, duration: 0.55 }}
-            className="text-xs uppercase tracking-[0.42em] text-sky-100/45"
+            transition={{ delay: 0.08, duration: 0.35 }}
+            className="text-xs uppercase tracking-[0.32em] text-sky-100/45"
           >
-            {question.category ?? "Open"} / {question.intensity ?? "Personal"}
+            {category?.label ?? "Question"}
           </motion.p>
           <motion.h3
-            initial={{ opacity: 0, y: 14 }}
+            initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.26, duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ delay: 0.12, duration: 0.45, ease: "easeOut" }}
             className="mt-6 max-h-72 overflow-y-auto pr-1 font-serif text-4xl leading-tight text-stone-50 sm:text-6xl"
           >
             {question.text || "A quiet question is waiting here."}
           </motion.h3>
 
           <div className="mt-8 flex flex-col items-center gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <CountdownTimer key={`${question.id}-${duration}`} duration={duration} onComplete={handleComplete} />
-            <div className="duration-switch" aria-label="Timer length">
-              {[45, 60, 90].map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => chooseDuration(option)}
-                  className={duration === option ? "is-active" : ""}
-                >
-                  {option}s
-                </button>
-              ))}
-            </div>
+            <CountdownTimer duration={60} onComplete={handleComplete} />
             <AnimatePresence>
               {finished && (
                 <motion.p
@@ -839,15 +912,12 @@ function QuestionModal({ question, onClose, onNext }) {
         </div>
 
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
-          <button
-            onClick={onClose}
-            className="rounded-full border border-white/10 bg-white/[0.06] px-6 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-blue-50/75 transition hover:border-white/25 hover:bg-white/[0.1]"
-          >
+          <button onClick={onClose} className="soft-button">
             Close
           </button>
           <button
             onClick={onNext}
-            className="rounded-full bg-gradient-to-r from-sky-100 via-blue-100 to-amber-100 px-6 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-slate-950 shadow-aurora transition hover:shadow-ember"
+            className="rounded-full bg-gradient-to-r from-sky-100 via-blue-100 to-amber-100 px-6 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-950 shadow-aurora transition hover:shadow-ember"
           >
             Next
           </button>
@@ -860,6 +930,7 @@ function QuestionModal({ question, onClose, onNext }) {
 function CountdownTimer({ duration, onComplete }) {
   const [remaining, setRemaining] = useState(duration);
   const completed = useRef(false);
+  const lastWarningSecond = useRef(null);
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   const progress = 1 - remaining / duration;
@@ -869,6 +940,7 @@ function CountdownTimer({ duration, onComplete }) {
   useEffect(() => {
     const startedAt = Date.now();
     completed.current = false;
+    lastWarningSecond.current = null;
     setRemaining(duration);
 
     const interval = window.setInterval(() => {
@@ -877,8 +949,18 @@ function CountdownTimer({ duration, onComplete }) {
 
       setRemaining(nextRemaining);
 
+      if (
+        nextRemaining <= 5 &&
+        nextRemaining > 0 &&
+        lastWarningSecond.current !== nextRemaining
+      ) {
+        lastWarningSecond.current = nextRemaining;
+        audioManager.play("timerWarning");
+      }
+
       if (nextRemaining === 0 && !completed.current) {
         completed.current = true;
+        audioManager.play("timerComplete");
         onComplete();
         window.clearInterval(interval);
       }
@@ -890,7 +972,7 @@ function CountdownTimer({ duration, onComplete }) {
   return (
     <div className="flex items-center gap-4">
       <div className="relative grid h-28 w-28 place-items-center">
-        <svg className="-rotate-90" width="112" height="112" viewBox="0 0 112 112">
+        <svg className="-rotate-90 block" width="112" height="112" viewBox="0 0 112 112">
           <circle
             cx="56"
             cy="56"
@@ -909,14 +991,16 @@ function CountdownTimer({ duration, onComplete }) {
             strokeWidth="8"
             strokeDasharray={circumference}
             strokeDashoffset={offset}
-            transition={{ duration: 0.35, ease: "easeOut" }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
           />
         </svg>
-        <span className="absolute font-serif text-3xl text-stone-50">{remaining}</span>
+        <span className="absolute inset-0 flex items-center justify-center font-sans text-3xl leading-none text-stone-50">
+          {remaining}
+        </span>
       </div>
       <div>
-        <p className="text-xs uppercase tracking-[0.35em] text-blue-100/45">
-          {duration} seconds
+        <p className="text-xs uppercase tracking-[0.28em] text-blue-100/45">
+          60 seconds
         </p>
         <p className="mt-2 max-w-48 text-sm leading-6 text-blue-100/60">
           Let the answer breathe before the next star opens.
@@ -926,30 +1010,27 @@ function CountdownTimer({ duration, onComplete }) {
   );
 }
 
-function LoadingVault() {
+function LoadingBox() {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      {Array.from({ length: 8 }, (_, index) => (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {Array.from({ length: 6 }, (_, index) => (
         <div
           key={index}
-          className="min-h-48 animate-pulse rounded-[2rem] border border-white/10 bg-white/[0.04]"
+          className="min-h-44 animate-pulse rounded-[1.5rem] border border-white/10 bg-white/[0.04]"
         />
       ))}
     </div>
   );
 }
 
-function EmptyVault({ onSwitchView }) {
+function EmptyBox({ onSwitchView }) {
   return (
-    <div className="glass-card mx-auto mt-20 max-w-xl p-8 text-center">
-      <p className="font-serif text-4xl text-stone-50">The sky is quiet.</p>
+    <div className="glass-card mx-auto mt-16 max-w-xl p-8 text-center">
+      <p className="font-serif text-4xl text-stone-50">Question Box is empty.</p>
       <p className="mt-4 leading-7 text-blue-100/60">
-        Add the first question and give this little universe something to glow about.
+        Add the first question, then come back when the box is unlocked.
       </p>
-      <button
-        onClick={onSwitchView}
-        className="mt-7 rounded-full bg-sky-100 px-6 py-3 text-xs font-semibold uppercase tracking-[0.25em] text-slate-950"
-      >
+      <button onClick={onSwitchView} className="mt-7 rounded-full bg-sky-100 px-6 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-950">
         Write One
       </button>
     </div>
@@ -958,30 +1039,20 @@ function EmptyVault({ onSwitchView }) {
 
 function CosmicBackdrop() {
   return (
-    <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden bg-[linear-gradient(135deg,#02030b_0%,#071126_42%,#1b1230_75%,#070512_100%)]">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_18%,rgba(97,170,255,0.22),transparent_30%),radial-gradient(circle_at_88%_12%,rgba(255,205,151,0.12),transparent_26%),radial-gradient(circle_at_60%_84%,rgba(129,95,255,0.16),transparent_32%)]" />
-      <div className="absolute left-1/2 top-1/2 h-[42rem] w-[42rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-300/5 blur-3xl" />
+    <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden bg-[linear-gradient(135deg,#02030b_0%,#071126_48%,#241426_100%)]">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_18%,rgba(77,190,219,0.18),transparent_30%),radial-gradient(circle_at_86%_16%,rgba(255,205,151,0.12),transparent_28%),radial-gradient(circle_at_64%_82%,rgba(198,88,132,0.13),transparent_34%)]" />
+      <div className="absolute left-1/2 top-1/2 h-[38rem] w-[38rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-200/5 blur-3xl" />
       {starSeeds.map((star) => (
-        <motion.span
+        <span
           key={star.id}
-          className="absolute rounded-full bg-sky-100"
+          className="twinkle-star"
           style={{
             left: star.left,
             top: star.top,
             width: star.size,
             height: star.size,
-            boxShadow: "0 0 18px rgba(191, 226, 255, 0.85)",
-          }}
-          animate={{
-            y: [0, -star.drift, star.drift * 0.25, 0],
-            opacity: [0.2, 0.92, 0.36, 0.2],
-            scale: [1, 1.45, 0.9, 1],
-          }}
-          transition={{
-            duration: star.duration,
-            delay: star.delay,
-            repeat: Infinity,
-            ease: "easeInOut",
+            animationDelay: star.delay,
+            animationDuration: star.duration,
           }}
         />
       ))}

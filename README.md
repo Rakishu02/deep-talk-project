@@ -1,6 +1,7 @@
-# Deep Talk Vault
+# Deep Talk
 
-A romantic, interactive deep-talk web app for couples built with React, Vite, Tailwind CSS, Framer Motion, and Supabase.
+A romantic question box for collecting deep-talk prompts first, then opening them later.
+Built with React, Vite, Tailwind CSS, Framer Motion, and Supabase. Made with AI.
 
 ## Setup
 
@@ -17,10 +18,16 @@ A romantic, interactive deep-talk web app for couples built with React, Vite, Ta
    VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
 
-3. Audio is synthesized in the browser after the first tap, so the app no longer
-   needs uploaded mp3 assets to feel alive.
+3. Replace the dummy mp3 files in `public/audio/` when you have final sounds.
+   The current names match their effect so they are easy to search for.
 
-4. Run the app:
+4. Lock or unlock the Question Box in:
+
+   ```text
+   src/config/questionBoxSettings.js
+   ```
+
+5. Run the app:
 
    ```bash
    npm run dev
@@ -35,11 +42,10 @@ The app expects a `questions` table with:
 | `id` | `int8` identity primary key |
 | `created_at` | `timestamptz` |
 | `text` | `text` |
+| `category` | `text` |
 | `is_opened` | `bool` |
 
-When a question is submitted, the app inserts `{ text, is_opened: false }`.
-When a vault card is closed or skipped forward, the app updates `is_opened` to `true`.
+`category` should be either `self` or `relationship`.
 
-The deployed app also ships with a built-in starter deck. Those starter questions
-do not need database rows, and their opened state is stored in each visitor's
-browser.
+If your existing table does not have `category` yet, the app can still save the
+question text, but categories will only persist after you add that column.
