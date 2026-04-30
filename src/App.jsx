@@ -288,6 +288,7 @@ function TopBar({ muted, onToggleMuted }) {
 function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView }) {
   const [text, setText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const textareaRef = useRef(null);
 
   useEffect(() => {
     if (!success) return;
@@ -295,6 +296,14 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
     const timer = window.setTimeout(onSuccessSettled, 2400);
     return () => window.clearTimeout(timer);
   }, [success, onSuccessSettled]);
+
+  const handleTextChange = (event) => {
+    setText(event.target.value);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  };
 
   const submitQuestion = async (event) => {
     event.preventDefault();
@@ -304,6 +313,9 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
 
     if (saved) {
       setText("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
     }
   };
 
@@ -328,8 +340,9 @@ function WriteView({ error, success, onSubmit, onSuccessSettled, onSwitchView })
           </label>
           <textarea
             id="question"
+            ref={textareaRef}
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onChange={handleTextChange}
             placeholder="What's on your mind?..."
             className="cosmic-textarea min-h-64 w-full resize-none rounded-[1.5rem] border border-sky-200/10 bg-white/[0.04] p-5 font-serif text-3xl leading-tight text-stone-50 outline-none transition placeholder:text-blue-100/30 focus:border-sky-200/40 focus:bg-white/[0.07] sm:p-7 sm:text-5xl"
           />
@@ -495,6 +508,7 @@ function VaultView({
 function QuestionCard({ index, question, onClick }) {
   const isOpened = Boolean(question.is_opened);
   const heightClass = ["min-h-44", "min-h-52", "min-h-48", "min-h-60"][index % 4];
+  const stateClass = isOpened ? "question-card-opened" : "unopened-glow";
 
   return (
     <motion.button
@@ -502,7 +516,7 @@ function QuestionCard({ index, question, onClick }) {
       onClick={onClick}
       whileHover={{ y: -8, rotate: index % 2 ? -1 : 1 }}
       whileTap={{ scale: 0.98 }}
-      className={`question-card ${heightClass} ${isOpened ? "question-card-opened" : ""}`}
+      className={`question-card ${heightClass} ${stateClass}`}
     >
       <span className="absolute right-5 top-5 h-12 w-12 rounded-full bg-sky-200/10 blur-xl" />
       <span className="absolute -bottom-5 -left-5 h-24 w-24 rounded-full bg-amber-200/10 blur-2xl" />
